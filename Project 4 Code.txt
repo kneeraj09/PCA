@@ -1,0 +1,681 @@
+Project 4 code:
+
+import cvxpy as cvx
+import numpy as np
+import pandas as pd
+import time
+import project_tests
+import project_helper
+
+import matplotlib.pyplot as plt
+%matplotlib inline
+plt.style.use('ggplot')
+plt.rcParams['figure.figsize'] = (14, 8)
+
+====
+Data Bundle
+
+import os
+import project_helper
+from zipline.data import bundles
+
+os.environ['ZIPLINE_ROOT'] = os.path.join(os.getcwd(), '..', '..', 'data', 'project_4_eod')
+
+ingest_func = bundles.csvdir.csvdir_equities(['daily'], project_helper.EOD_BUNDLE_NAME)
+bundles.register(project_helper.EOD_BUNDLE_NAME, ingest_func)
+
+print('Data Registered')
+===
+
+Build Pipeline Engine: We'll be using Zipline's pipeline package to access our data for this project. 
+To use it, we must build a pipeline engine. Run the cell below to build the engine.
+
+from zipline.pipeline import Pipeline
+from zipline.pipeline.factors import AverageDollarVolume
+from zipline.utils.calendars import get_calendar
+
+
+universe = AverageDollarVolume(window_length=120).top(500) 
+trading_calendar = get_calendar('NYSE') 
+bundle_data = bundles.load(project_helper.EOD_BUNDLE_NAME)
+engine = project_helper.build_pipeline_engine(bundle_data, trading_calendar)
+
+===
+
+View Data
+With the pipeline engine built, let's get the stocks at the end of the period in the universe we're using. 
+We'll use these tickers to generate the returns data for the our risk model.
+
+universe_end_date = pd.Timestamp('2016-01-05', tz='UTC')
+
+universe_tickers = engine\
+    .run_pipeline(
+        Pipeline(screen=universe),
+        universe_end_date,
+        universe_end_date)\
+    .index.get_level_values(1)\
+    .values.tolist()
+    
+universe_tickers
+
+===
+
+Get Returns
+Not that we have our pipeline built, let's access the returns data. We'll start by building a data portal.
+
+from zipline.data.data_portal import DataPortal
+
+
+data_portal = DataPortal(
+    bundle_data.asset_finder,
+    trading_calendar=trading_calendar,
+    first_trading_day=bundle_data.equity_daily_bar_reader.first_trading_day,
+    equity_minute_reader=None,
+    equity_daily_reader=bundle_data.equity_daily_bar_reader,
+    adjustment_reader=bundle_data.adjustment_reader)
+===
+
+To make the code easier to read, we've built the helper function get_pricing to get the pricing from the data portal.
+
+def get_pricing(data_portal, trading_calendar, assets, start_date, end_date, field='close'):
+    end_dt = pd.Timestamp(end_date.strftime('%Y-%m-%d'), tz='UTC', offset='C')
+    start_dt = pd.Timestamp(start_date.strftime('%Y-%m-%d'), tz='UTC', offset='C')
+
+    end_loc = trading_calendar.closes.index.get_loc(end_dt)
+    start_loc = trading_calendar.closes.index.get_loc(start_dt)
+
+    return data_portal.get_history_window(
+        assets=assets,
+        end_dt=end_dt,
+        bar_count=end_loc - start_loc,
+        frequency='1d',
+        field=field,
+        data_frequency='daily')
+===
+
+View Data
+Let's get returns data for our risk model using the get_pricing function. For this model, we'll be looking back to 5 years of data.
+
+five_year_returns = \
+    get_pricing(
+        data_portal,
+        trading_calendar,
+        universe_tickers,
+        universe_end_date - pd.DateOffset(years=5),
+        universe_end_date)\
+    .pct_change()[1:].fillna(0)
+
+five_year_returns
+
+=== 
+tatistical Risk Model
+It's time to build the risk model. You'll be creating a statistical risk model using PCA. So, the first thing is building the PCA model.
+
+Fit PCA
+Implement fit_pca to fit a PCA model to the returns data
+
+from sklearn.decomposition import PCA
+
+
+def fit_pca(returns, num_factor_exposures, svd_solver):
+    """
+    Fit PCA model with returns.
+
+    Parameters
+    ----------
+    returns : DataFrame
+        Returns for each ticker and date
+    num_factor_exposures : int
+        Number of factors for PCA
+    svd_solver: str
+        The solver to use for the PCA model
+
+    Returns
+    -------
+    pca : PCA
+        Model fit to returns
+    """
+    #TODO: Implement function
+    
+    mod = PCA(n_components = num_factor_exposures, svd_solver ='full' )
+    pca = mod.fit(returns)
+    
+    return pca
+
+
+project_tests.test_fit_pca(fit_pca)
+
+===
+
+View Data
+Let's see what the model looks like. First, we'll look at the PCA components.
+
+num_factor_exposures = 20
+pca = fit_pca(five_year_returns, num_factor_exposures, 'full')
+
+pca.components_
+
+Let's also look at the PCA's percent of variance explained by each factor
+
+plt.bar(np.arange(num_factor_exposures), pca.explained_variance_ratio_)
+
+You will see that the first factor dominates. The precise definition of each factor in a latent model is unknown, 
+however we can guess at the likely interpretation.
+
+====
+
+Factor Betas
+Implement factor_betas to get the factor betas from the PCA model.
+
+def factor_betas(pca, factor_beta_indices, factor_beta_columns):
+    """
+    Get the factor betas from the PCA model.
+
+    Parameters
+    ----------
+    pca : PCA
+        Model fit to returns
+    factor_beta_indices : 1 dimensional Ndarray
+        Factor beta indices
+    factor_beta_columns : 1 dimensional Ndarray
+        Factor beta columns
+
+    Returns
+    -------
+    factor_betas : DataFrame
+        Factor betas
+    """
+    assert len(factor_beta_indices.shape) == 1
+    assert len(factor_beta_columns.shape) == 1
+    
+    #TODO: Implement function
+    
+    factor_betas = pd.DataFrame(data= pca.components_.T, index = factor_beta_indices, columns= factor_beta_columns)
+    
+    
+    return factor_betas
+
+
+project_tests.test_factor_betas(factor_betas)
+
+===
+
+
+
+View Data
+Let's view the factor betas from this model.
+
+risk_model = {}
+risk_model['factor_betas'] = factor_betas(pca, five_year_returns.columns.values, np.arange(num_factor_exposures))
+
+risk_model['factor_betas']
+
+===
+
+Factor Returns
+Implement factor_returns to get the factor returns from the PCA model using the returns data.
+
+def factor_returns(pca, returns, factor_return_indices, factor_return_columns):
+    """
+    Get the factor returns from the PCA model.
+
+    Parameters
+    ----------
+    pca : PCA
+        Model fit to returns
+    returns : DataFrame
+        Returns for each ticker and date
+    factor_return_indices : 1 dimensional Ndarray
+        Factor return indices
+    factor_return_columns : 1 dimensional Ndarray
+        Factor return columns
+
+    Returns
+    -------
+    factor_returns : DataFrame
+        Factor returns
+    """
+    assert len(factor_return_indices.shape) == 1
+    assert len(factor_return_columns.shape) == 1
+    
+    #TODO: Implement function
+    factor_returns = pd.DataFrame(pca.transform(returns), factor_return_indices, factor_return_columns)
+    
+    return factor_returns
+
+
+project_tests.test_factor_returns(factor_returns)
+
+===
+View Data
+Let's see what these factor returns looks like over time.
+
+risk_model['factor_returns'] = factor_returns(
+    pca,
+    five_year_returns,
+    five_year_returns.index,
+    np.arange(num_factor_exposures))
+
+risk_model['factor_returns'].cumsum().plot(legend=None)
+
+===
+
+Factor Covariance Matrix
+Implement factor_cov_matrix to get the factor covariance matrix.
+
+def factor_cov_matrix(factor_returns, ann_factor):
+    """
+    Get the factor covariance matrix
+
+    Parameters
+    ----------
+    factor_returns : DataFrame
+        Factor returns
+    ann_factor : int
+        Annualization factor
+
+    Returns
+    -------
+    factor_cov_matrix : 2 dimensional Ndarray
+        Factor covariance matrix
+    """
+    #TODO: Implement function
+    
+    factor_cov = np.diag(np.var(factor_returns, axis= 0, ddof=1))*ann_factor
+    
+    return factor_cov
+
+
+project_tests.test_factor_cov_matrix(factor_cov_matrix)
+
+===
+
+ann_factor = 252
+risk_model['factor_cov_matrix'] = factor_cov_matrix(risk_model['factor_returns'], ann_factor)
+
+risk_model['factor_cov_matrix']
+
+===
+
+Idiosyncratic Variance Matrix
+Implement idiosyncratic_var_matrix to get the idiosyncratic variance matrix.
+
+def idiosyncratic_var_matrix(returns, factor_returns, factor_betas, ann_factor):
+    """
+    Get the idiosyncratic variance matrix
+
+    Parameters
+    ----------
+    returns : DataFrame
+        Returns for each ticker and date
+    factor_returns : DataFrame
+        Factor returns
+    factor_betas : DataFrame
+        Factor betas
+    ann_factor : int
+        Annualization factor
+
+    Returns
+    -------
+    idiosyncratic_var_matrix : DataFrame
+        Idiosyncratic variance matrix
+    """
+    
+    #TODO: Implement function
+    common_returns_ = pd.DataFrame(np.dot(factor_returns, factor_betas.T), index = returns.index, columns= returns.columns)
+    
+    specific_returns = (returns - common_returns_)
+    idiosyncratic_var_matrix = np.diag(np.var(specific_returns))*ann_factor
+    
+    
+    return pd.DataFrame(idiosyncratic_var_matrix, returns.columns, returns.columns)
+
+
+project_tests.test_idiosyncratic_var_matrix(idiosyncratic_var_matrix)
+
+===
+
+risk_model['idiosyncratic_var_matrix'] = idiosyncratic_var_matrix(five_year_returns, risk_model['factor_returns'], risk_model['factor_betas'], ann_factor)
+
+risk_model['idiosyncratic_var_matrix']
+
+===
+
+Idiosyncratic Variance Vector
+Implement idiosyncratic_var_vector to get the idiosyncratic variance Vector.
+
+def idiosyncratic_var_vector(returns, idiosyncratic_var_matrix):
+    """
+    Get the idiosyncratic variance vector
+
+    Parameters
+    ----------
+    returns : DataFrame
+        Returns for each ticker and date
+    idiosyncratic_var_matrix : DataFrame
+        Idiosyncratic variance matrix
+
+    Returns
+    -------
+    idiosyncratic_var_vector : DataFrame
+        Idiosyncratic variance Vector
+    """
+    
+    #TODO: Implement function
+    
+    idiosyncratic_var_vector = pd.DataFrame(data = np.diag(idiosyncratic_var_matrix.values), index = returns.columns)
+    
+    return idiosyncratic_var_vector 
+
+
+project_tests.test_idiosyncratic_var_vector(idiosyncratic_var_vector)
+
+===
+
+risk_model['idiosyncratic_var_vector'] = idiosyncratic_var_vector(five_year_returns, risk_model['idiosyncratic_var_matrix'])
+
+risk_model['idiosyncratic_var_vector']
+
+===
+
+Predict using the Risk Model
+Using the data we calculated in the risk model, implement predict_portfolio_risk to predict the portfolio risk using the formula  ????(????????+??)??????????????????????????????v where:
+
+??  is the portfolio weights
+??  is the factor betas
+??  is the factor covariance matrix
+??  is the idiosyncratic variance matrix
+
+def predict_portfolio_risk(factor_betas, factor_cov_matrix, idiosyncratic_var_matrix, weights):
+    """
+    Get the predicted portfolio risk
+    
+    Formula for predicted portfolio risk is sqrt(X.T(BFB.T + S)X) where:
+      X is the portfolio weights
+      B is the factor betas
+      F is the factor covariance matrix
+      S is the idiosyncratic variance matrix
+
+    Parameters
+    ----------
+    factor_betas : DataFrame
+        Factor betas
+    factor_cov_matrix : 2 dimensional Ndarray
+        Factor covariance matrix
+    idiosyncratic_var_matrix : DataFrame
+        Idiosyncratic variance matrix
+    weights : DataFrame
+        Portfolio weights
+
+    Returns
+    -------
+    predicted_portfolio_risk : float
+        Predicted portfolio risk
+    """
+    assert len(factor_cov_matrix.shape) == 2
+    
+    #TODO: Implement function
+    S = idiosyncratic_var_matrix.values.diagonal()
+    print('Shape of S is :{}'.format(S.shape))
+    B = factor_betas.values
+    print('Shape of B is :{}'.format(B.shape))
+    F = factor_cov_matrix
+    print('Shape of F is :{}'.format(F.shape))
+    x = weights.values
+    print('Shape of x is :{}'.format(x.shape))
+    
+    
+    predicted_portfolio_risk = np.sqrt(x.T.dot(B.dot(F).dot(B.T)+S).dot(x))
+    print(predicted_portfolio_risk)    
+    return predicted_portfolio_risk.flatten()[0]
+
+project_tests.test_predict_portfolio_risk(predict_portfolio_risk)
+===
+
+all_weights = pd.DataFrame(np.repeat(1/len(universe_tickers), len(universe_tickers)), universe_tickers)
+
+predict_portfolio_risk(
+    risk_model['factor_betas'],
+    risk_model['factor_cov_matrix'],
+    risk_model['idiosyncratic_var_matrix'],
+    all_weights)
+===
+
+With the profile risk calculated, it's time to start working on the alpha factors. In this project, we'll create the following factors:
+
+Momentum 1 Year Factor
+Mean Reversion 5 Day Sector Neutral Factor
+Mean Reversion 5 Day Sector Neutral Smoothed Factor
+Overnight Sentiment Factor
+Overnight Sentiment Smoothed Factor
+Momentum 1 Year Factor
+Each factor will have a hypothesis that goes with it. For this factor, it is "Higher past 12-month (252 days) returns are proportional to future return." Using that hypothesis, we've generated this code:
+
+from zipline.pipeline.factors import Returns
+
+def momentum_1yr(window_length, universe, sector):
+    return Returns(window_length=window_length, mask=universe) \
+        .demean(groupby=sector) \
+        .rank() \
+        .zscore()
+
+====
+
+Mean Reversion 5 Day Sector Neutral Factor
+Now it's time for you to implement mean_reversion_5day_sector_neutral using the hypothesis "Short-term outperformers(underperformers) compared to their sector will revert." Use the returns data from universe, demean using the sector data to partition, rank, then converted to a zscore.
+
+===
+
+from zipline.pipeline.factors import Returns
+from zipline.pipeline.factors import SimpleMovingAverage
+def mean_reversion_5day_sector_neutral(window_length, universe, sector):
+    """
+    Generate the mean reversion 5 day sector neutral factor
+
+    Parameters
+    ----------
+    window_length : int
+        Returns window length
+    universe : Zipline Filter
+        Universe of stocks filter
+    sector : Zipline Classifier
+        Sector classifier
+
+    Returns
+    -------
+    factor : Zipline Factor
+        Mean reversion 5 day sector neutral factor
+    """
+    
+    #TODO: Implement function
+    factor = -Returns(window_length = window_length, mask=universe).demean(groupby=sector).rank().zscore()
+    
+    return factor
+     
+
+project_tests.test_mean_reversion_5day_sector_neutral(mean_reversion_5day_sector_neutral)
+
+===
+
+Running Integration Test on pipeline:
+> start_dat = pd.Timestamp('2015-01-05', tz='utc')
+> end_date = pd.Timestamp('2015-01-07', tz='utc')
+> universe = AverageDollarVolume(window_length=2).top(4)
+> factor = mean_reversion_5day_sector_neutral(
+    window_length=3,
+    universe=universe,
+    sector=project_helper.Sector())
+> pipeline.add(factor, 'Mean_Reversion_5Day_Sector_Neutral')
+> engine.run_pipeline(pipeline, start_dat, end_date)
+
+Tests Passed
+View Data
+Let's see what some of the factor data looks like. For calculating factors, we'll be looking back 2 years.
+
+Note: Going back 2 years falls on a day when the market is closed. Pipeline package doesn't handle start or end dates that don't fall on days when the market is open. To fix this, we went back 2 extra days to fall on the next day when the market is open.
+===
+factor_start_date = universe_end_date - pd.DateOffset(years=2, days=2)
+sector = project_helper.Sector()
+window_length = 5
+
+pipeline = Pipeline(screen=universe)
+pipeline.add(
+    mean_reversion_5day_sector_neutral(window_length, universe, sector),
+    'Mean_Reversion_5Day_Sector_Neutral')
+engine.run_pipeline(pipeline, factor_start_date, universe_end_date)
+===
+
+Mean Reversion 5 Day Sector Neutral Smoothed Factor
+Taking the output of the previous factor, let's create a smoothed version. Implement mean_reversion_5day_sector_neutral_smoothed to generate a mean reversion 5 fay sector neutral smoothed factor. Call the mean_reversion_5day_sector_neutral function to get the unsmoothed factor, then use SimpleMovingAverage function to smooth it. You'll have to apply rank and zscore again.
+
+===
+
+from zipline.pipeline.factors import SimpleMovingAverage
+
+def mean_reversion_5day_sector_neutral_smoothed(window_length, universe, sector):
+    """
+    Generate the mean reversion 5 day sector neutral smoothed factor
+
+    Parameters
+    ----------
+    window_length : int
+        Returns window length
+    universe : Zipline Filter
+        Universe of stocks filter
+    sector : Zipline Classifier
+        Sector classifier
+
+    Returns
+    -------
+    factor : Zipline Factor
+        Mean reversion 5 day sector neutral smoothed factor
+    """
+    
+    #TODO: Implement function
+    factor = -Returns(window_length = window_length, mask=universe).demean(groupby=sector).rank().zscore()
+    factor_smoothed = SimpleMovingAverage(inputs = [factor], window_length =  window_length).rank().zscore()
+    return factor_smoothed
+
+
+project_tests.test_mean_reversion_5day_sector_neutral_smoothed(mean_reversion_5day_sector_neutral_smoothed)
+
+===
+
+View Data
+Let's see what some of the smoothed data looks like.
+
+===
+
+pipeline = Pipeline(screen=universe)
+pipeline.add(
+    mean_reversion_5day_sector_neutral_smoothed(5, universe, sector),
+    'Mean_Reversion_5Day_Sector_Neutral_Smoothed')
+engine.run_pipeline(pipeline, factor_start_date, universe_end_date)
+
+===
+
+Overnight Sentiment Factor
+For this factor, were using the hypothesis from the paper Overnight Returns and Firm-Specific Investor Sentiment.
+
+from zipline.pipeline.data import USEquityPricing
+
+
+class CTO(Returns):
+    """
+    Computes the overnight return, per hypothesis from
+    https://papers.ssrn.com/sol3/papers.cfm?abstract_id=2554010
+    """
+    inputs = [USEquityPricing.open, USEquityPricing.close]
+    
+    def compute(self, today, assets, out, opens, closes):
+        """
+        The opens and closes matrix is 2 rows x N assets, with the most recent at the bottom.
+        As such, opens[-1] is the most recent open, and closes[0] is the earlier close
+        """
+        out[:] = (opens[-1] - closes[0]) / closes[0]
+
+        
+class TrailingOvernightReturns(Returns):
+    """
+    Sum of trailing 1m O/N returns
+    """
+    window_safe = True
+    
+    def compute(self, today, asset_ids, out, cto):
+        out[:] = np.nansum(cto, axis=0)
+
+        
+def overnight_sentiment(cto_window_length, trail_overnight_returns_window_length, universe):
+    cto_out = CTO(mask=universe, window_length=cto_window_length)
+    return TrailingOvernightReturns(inputs=[cto_out], window_length=trail_overnight_returns_window_length) \
+        .rank() \
+        .zscore()
+
+===
+
+Overnight Sentiment Smoothed Factor
+Just like the factor you implemented, we'll also smooth this factor.
+
+def overnight_sentiment_smoothed(cto_window_length, trail_overnight_returns_window_length, universe):
+    unsmoothed_factor = overnight_sentiment(cto_window_length, trail_overnight_returns_window_length, universe)
+    return SimpleMovingAverage(inputs=[unsmoothed_factor], window_length=trail_overnight_returns_window_length) \
+        .rank() \
+        .zscore()
+
+===
+
+Combine the Factors to a single Pipeline
+With all the factor implementations done, let's add them to a pipeline.
+
+===
+universe = AverageDollarVolume(window_length=120).top(500)
+sector = project_helper.Sector()
+
+pipeline = Pipeline(screen=universe)
+pipeline.add(
+    momentum_1yr(252, universe, sector),
+    'Momentum_1YR')
+pipeline.add(
+    mean_reversion_5day_sector_neutral(5, universe, sector),
+    'Mean_Reversion_5Day_Sector_Neutral')
+pipeline.add(
+    mean_reversion_5day_sector_neutral_smoothed(5, universe, sector),
+    'Mean_Reversion_5Day_Sector_Neutral_Smoothed')
+pipeline.add(
+    overnight_sentiment(2, 5, universe),
+    'Overnight_Sentiment')
+pipeline.add(
+    overnight_sentiment_smoothed(2, 5, universe),
+    'Overnight_Sentiment_Smoothed')
+all_factors = engine.run_pipeline(pipeline, factor_start_date, universe_end_date)
+
+all_factors.head()
+
+===
+
+Evaluate Alpha Factors
+Note: We're evaluating the alpha factors using delay of 1
+
+Get Pricing Data
+
+
+
+===
+
+import alphalens as al
+
+assets = all_factors.index.levels[1].values.tolist()
+pricing = get_pricing(
+    data_portal,
+    trading_calendar,
+    assets,
+    factor_start_date,
+    universe_end_date)
+
+===
+Format alpha factors and pricing for Alphalens
+In order to use a lot of the alphalens functions, we need to aligned the indices and convert the time to unix timestamp. In this next cell, we'll do just that.
+
+===	
+	
+
